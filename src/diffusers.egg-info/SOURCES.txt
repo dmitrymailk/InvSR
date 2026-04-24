@@ -1,7 +1,5 @@
 LICENSE
-MANIFEST.in
 README.md
-pyproject.toml
 setup.py
 src/diffusers/__init__.py
 src/diffusers/callbacks.py
@@ -100,6 +98,7 @@ src/diffusers/models/unets/unet_2d.py
 src/diffusers/models/unets/unet_2d_blocks.py
 src/diffusers/models/unets/unet_2d_blocks_flax.py
 src/diffusers/models/unets/unet_2d_condition.py
+src/diffusers/models/unets/unet_2d_condition_discriminator.py
 src/diffusers/models/unets/unet_2d_condition_flax.py
 src/diffusers/models/unets/unet_3d_blocks.py
 src/diffusers/models/unets/unet_3d_condition.py
@@ -325,6 +324,7 @@ src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_image_variati
 src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_img2img.py
 src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_inpaint.py
 src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_instruct_pix2pix.py
+src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_inversion_sr.py
 src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_latent_upscale.py
 src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion_upscale.py
 src/diffusers/pipelines/stable_diffusion/pipeline_stable_unclip.py
@@ -337,6 +337,7 @@ src/diffusers/pipelines/stable_diffusion_3/pipeline_output.py
 src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
 src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3_img2img.py
 src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3_inpaint.py
+src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3_inversion_sr.py
 src/diffusers/pipelines/stable_diffusion_attend_and_excite/__init__.py
 src/diffusers/pipelines/stable_diffusion_attend_and_excite/pipeline_stable_diffusion_attend_and_excite.py
 src/diffusers/pipelines/stable_diffusion_diffedit/__init__.py
@@ -364,6 +365,7 @@ src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py
 src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py
 src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_inpaint.py
 src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_instruct_pix2pix.py
+src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_inversion_sr.py
 src/diffusers/pipelines/stable_diffusion_xl/watermark.py
 src/diffusers/pipelines/stable_video_diffusion/__init__.py
 src/diffusers/pipelines/stable_video_diffusion/pipeline_stable_video_diffusion.py
@@ -392,6 +394,13 @@ src/diffusers/pipelines/wuerstchen/modeling_wuerstchen_prior.py
 src/diffusers/pipelines/wuerstchen/pipeline_wuerstchen.py
 src/diffusers/pipelines/wuerstchen/pipeline_wuerstchen_combined.py
 src/diffusers/pipelines/wuerstchen/pipeline_wuerstchen_prior.py
+src/diffusers/quantizers/__init__.py
+src/diffusers/quantizers/auto.py
+src/diffusers/quantizers/base.py
+src/diffusers/quantizers/quantization_config.py
+src/diffusers/quantizers/bitsandbytes/__init__.py
+src/diffusers/quantizers/bitsandbytes/bnb_quantizer.py
+src/diffusers/quantizers/bitsandbytes/utils.py
 src/diffusers/schedulers/__init__.py
 src/diffusers/schedulers/scheduling_amused.py
 src/diffusers/schedulers/scheduling_consistency_decoder.py
