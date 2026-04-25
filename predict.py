@@ -11,13 +11,16 @@ from utils import util_common
 from sampler_invsr import InvSamplerSR
 from basicsr.utils.download_util import load_file_from_url
 
+
 class Predictor(BasePredictor):
     def setup(self) -> None:
         self.configs = OmegaConf.load("./configs/sample-sd-turbo.yaml")
 
     def set_configs(self, num_steps=1, chopping_size=128, seed=12345):
         if num_steps == 1:
-            self.configs.timesteps = [200,]
+            self.configs.timesteps = [
+                200,
+            ]
         elif num_steps == 2:
             self.configs.timesteps = [200, 100]
         elif num_steps == 3:
@@ -31,7 +34,7 @@ class Predictor(BasePredictor):
             self.configs.timesteps = np.linspace(
                 start=250, stop=0, num=num_steps, endpoint=False, dtype=np.int64()
             ).tolist()
-        print(f'Setting timesteps for inference: {self.configs.timesteps}')
+        print(f"Setting timesteps for inference: {self.configs.timesteps}")
 
         # path to save Stable Diffusion
         sd_path = "./weights"
@@ -66,7 +69,7 @@ class Predictor(BasePredictor):
         self,
         in_path: Path = Input(description="Input low-quality image"),
         num_steps: int = Input(
-            choices=[1,2,3,4,5], description="Number of sampling steps.", default=1
+            choices=[1, 2, 3, 4, 5], description="Number of sampling steps.", default=1
         ),
         chopping_size: int = Input(
             choices=[128, 256, 512], description="Chopping resolution", default=128
@@ -80,7 +83,7 @@ class Predictor(BasePredictor):
 
         sampler = InvSamplerSR(self.configs)
 
-        out_dir = 'invsr_output'
+        out_dir = "invsr_output"
         if os.path.exists(out_dir):
             shutil.rmtree(out_dir)
         sampler.inference(in_path, out_path=out_dir, bs=1)

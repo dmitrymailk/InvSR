@@ -3,6 +3,7 @@
 # Power by Zongsheng Yue 2024-12-11 17:17:41
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
 import argparse
@@ -18,11 +19,14 @@ from utils import util_common
 from utils import util_image
 from basicsr.utils.download_util import load_file_from_url
 
+
 def get_configs(num_steps=1, chopping_size=128, seed=12345):
     configs = OmegaConf.load("./configs/sample-sd-turbo.yaml")
 
     if num_steps == 1:
-        configs.timesteps = [200,]
+        configs.timesteps = [
+            200,
+        ]
     elif num_steps == 2:
         configs.timesteps = [200, 100]
     elif num_steps == 3:
@@ -36,7 +40,7 @@ def get_configs(num_steps=1, chopping_size=128, seed=12345):
         configs.timesteps = np.linspace(
             start=250, stop=0, num=num_steps, endpoint=False, dtype=np.int64()
         ).tolist()
-    print(f'Setting timesteps for inference: {configs.timesteps}')
+    print(f"Setting timesteps for inference: {configs.timesteps}")
 
     configs.sd_path = "./weights"
     util_common.mkdir(configs.sd_path, delete=False, parents=True)
@@ -62,30 +66,38 @@ def get_configs(num_steps=1, chopping_size=128, seed=12345):
 
     return configs
 
+
 def predict_single(in_path, num_steps=1, chopping_size=128, seed=12345):
     configs = get_configs(num_steps=num_steps, chopping_size=chopping_size, seed=seed)
     sampler = InvSamplerSR(configs)
 
-    out_dir = Path('invsr_output')
+    out_dir = Path("invsr_output")
     if not out_dir.exists():
         out_dir.mkdir()
     sampler.inference(in_path, out_path=out_dir, bs=1)
 
     out_path = out_dir / f"{Path(in_path).stem}.png"
-    assert out_path.exists(), 'Super-resolution failed!'
+    assert out_path.exists(), "Super-resolution failed!"
     im_sr = util_image.imread(out_path, chn="rgb", dtype="uint8")
 
     return im_sr, str(out_path)
 
-def process_batch(input_dir, num_steps=1, chopping_size=128, seed=12345, progress=gr.Progress()):
+
+def process_batch(
+    input_dir, num_steps=1, chopping_size=128, seed=12345, progress=gr.Progress()
+):
     input_path = Path(input_dir)
-    output_path = input_path / 'invsr_output'
+    output_path = input_path / "invsr_output"
     output_path.mkdir(exist_ok=True)
 
     configs = get_configs(num_steps=num_steps, chopping_size=chopping_size, seed=seed)
     sampler = InvSamplerSR(configs)
 
-    image_files = list(input_path.glob('*.jpg')) + list(input_path.glob('*.png')) + list(input_path.glob('*.jpeg'))
+    image_files = (
+        list(input_path.glob("*.jpg"))
+        + list(input_path.glob("*.png"))
+        + list(input_path.glob("*.jpeg"))
+    )
     total_files = len(image_files)
 
     if total_files == 0:
@@ -95,9 +107,12 @@ def process_batch(input_dir, num_steps=1, chopping_size=128, seed=12345, progres
     for idx, img_path in enumerate(image_files):
         out_path = output_path / f"{img_path.stem}.png"
         sampler.inference(str(img_path), out_path=output_path, bs=1)
-        progress((idx + 1)/total_files, desc=f"Processing image {idx + 1}/{total_files}")
+        progress(
+            (idx + 1) / total_files, desc=f"Processing image {idx + 1}/{total_files}"
+        )
 
     return f"Processed {total_files} images. Results saved in {output_path}"
+
 
 title = "Arbitrary-steps Image Super-resolution via Diffusion Inversion"
 
@@ -134,9 +149,11 @@ with gr.Blocks() as demo:
         with gr.Tab("Single Image"):
             with gr.Row():
                 with gr.Column():
-                    input_image = gr.Image(type="filepath", label="Input: Low Quality Image")
+                    input_image = gr.Image(
+                        type="filepath", label="Input: Low Quality Image"
+                    )
                     num_steps = gr.Dropdown(
-                        choices=[1,2,3,4,5],
+                        choices=[1, 2, 3, 4, 5],
                         value=1,
                         label="Number of steps",
                     )
@@ -149,19 +166,21 @@ with gr.Blocks() as demo:
                     process_btn = gr.Button("Process")
 
                 with gr.Column():
-                    output_image = gr.Image(type="numpy", label="Output: High Quality Image")
+                    output_image = gr.Image(
+                        type="numpy", label="Output: High Quality Image"
+                    )
                     output_file = gr.File(label="Download the output")
 
             process_btn.click(
                 fn=predict_single,
                 inputs=[input_image, num_steps, chopping_size, seed],
-                outputs=[output_image, output_file]
+                outputs=[output_image, output_file],
             )
 
         with gr.Tab("Batch Processing"):
             input_dir = gr.Textbox(label="Input Directory Path")
             batch_num_steps = gr.Dropdown(
-                choices=[1,2,3,4,5],
+                choices=[1, 2, 3, 4, 5],
                 value=1,
                 label="Number of steps",
             )
@@ -177,7 +196,7 @@ with gr.Blocks() as demo:
             batch_btn.click(
                 fn=process_batch,
                 inputs=[input_dir, batch_num_steps, batch_chopping_size, batch_seed],
-                outputs=output_text
+                outputs=output_text,
             )
 
     gr.Markdown(article)
