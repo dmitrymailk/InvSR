@@ -32,8 +32,8 @@ llpips:
 
 model:
   target: diffusers.models.autoencoders.NoisePredictor
-  ckpt_start_path: ~     # only used for training the intermidiate model
-  ckpt_path: ~           # For initializing
+  ckpt_start_path: ~
+  ckpt_path: ~
   compile: False
   params:
     in_channels: 3
@@ -44,9 +44,9 @@ model:
       - AttnUpBlock2D
       - AttnUpBlock2D
     block_out_channels:
-      - 256      # 192, 256
-      - 512      # 384, 512
-    layers_per_block: 
+      - 256
+      - 512
+    layers_per_block:
       - 3
       - 3
     act_fn: silu
@@ -56,7 +56,7 @@ model:
     mid_block_add_attention: True
     resnet_time_scale_shift: default
     temb_channels: 512
-    attention_head_dim: 64 
+    attention_head_dim: 64
     freq_shift: 0
     flip_sin_to_cos: True
     double_z: True
@@ -101,14 +101,14 @@ discriminator:
     encoder_hid_dim: ~
     encoder_hid_dim_type: ~
     attention_head_dim:
-      - 8 
-      - 16 
-      - 16 
+      - 8
+      - 16
+      - 16
     num_attention_heads: ~
     dual_cross_attention: False
     use_linear_projection: False
     class_embed_type: ~
-    addition_embed_type: text 
+    addition_embed_type: text
     addition_time_embed_dim: 256
     num_class_embeds: ~
     upcast_attention: ~
@@ -131,27 +131,23 @@ discriminator:
 
 degradation:
   sf: 4
-  # the first degradation process
-  resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
+  resize_prob: [0.2, 0.7, 0.1]
   resize_range: [0.15, 1.5]
   gaussian_noise_prob: 0.5
   noise_range: [1, 30]
   poisson_scale_range: [0.05, 3.0]
   gray_noise_prob: 0.4
   jpeg_range: [30, 95]
-
-  # the second degradation process
   second_order_prob: 0.5
   second_blur_prob: 0.8
-  resize_prob2: [0.3, 0.4, 0.3]  # up, down, keep
+  resize_prob2: [0.3, 0.4, 0.3]
   resize_range2: [0.3, 1.2]
   gaussian_noise_prob2: 0.5
   noise_range2: [1, 25]
   poisson_scale_range2: [0.05, 2.5]
   gray_noise_prob2: 0.4
   jpeg_range2: [30, 95]
-
-  gt_size: 512 
+  gt_size: 512
   resize_back: False
   use_sharp: False
 
@@ -159,22 +155,15 @@ data:
   train:
     type: realesrgan
     params:
-      data_source: 
+      data_source:
         source1:
           root_path: data/smoke_train
           image_path: images
           moment_path: ~
           text_path: ~
           im_ext: png
-          length: 8
-        source2:
-          root_path: data/smoke_train
-          image_path: images
-          moment_path: ~
-          text_path: ~
-          im_ext: png
-          length: 8
-      max_token_length: 77   # 77
+          length: 29
+      max_token_length: 77
       io_backend:
         type: disk
       blur_kernel_size: 21
@@ -184,7 +173,6 @@ data:
       blur_sigma: [0.2, 3.0]
       betag_range: [0.5, 4.0]
       betap_range: [1, 2.0]
-
       blur_kernel_size2: 15
       kernel_list2: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
       kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
@@ -192,9 +180,7 @@ data:
       blur_sigma2: [0.2, 1.5]
       betag_range2: [0.5, 4.0]
       betap_range2: [1, 2.0]
-
       final_sinc_prob: 0.8
-
       gt_size: ${degradation.gt_size}
       use_hflip: True
       use_rot: False
@@ -217,34 +203,27 @@ data:
       recursive: False
 
 train:
-  # predict started inverser
   start_mode: True
-  # learning rate
-  lr: 5e-5                      # learning rate 
-  lr_min: 5e-5                  # learning rate 
+  lr: 5e-5
+  lr_min: 5e-5
   lr_schedule: ~
   warmup_iterations: 2000
-  # discriminator
-  lr_dis: 5e-5                  # learning rate for dicriminator
-  weight_decay_dis: 1e-3        # weight decay for dicriminator
-  dis_init_iterations: 10000    # iterations used for updating the discriminator
-  dis_update_freq: 1            
-  # dataloader
-  batch: 1               
-  microbatch: 1 
+  lr_dis: 5e-5
+  weight_decay_dis: 1e-3
+  dis_init_iterations: 10000
+  dis_update_freq: 1
+  batch: 1
+  microbatch: 1
   num_workers: 1
-  prefetch_factor: 2            
+  prefetch_factor: 2
   use_text: False
-  # optimization settings
-  weight_decay: 0               
+  weight_decay: 0
   ema_rate: 0.999
-  iterations: 2                 # total iterations
-  # logging
-  save_freq: 10
-  log_freq: [200, 10]           # [training loss, training images, val images]
-  local_logging: True           # manually save images
-  tf_logging: False             # tensorboard logging
-  # loss 
+  iterations: 1000
+  save_freq: 25
+  log_freq: [10, 25]
+  local_logging: True
+  tf_logging: False
   loss_type: L2
   loss_coef:
     ldif: 1.0
@@ -252,16 +231,14 @@ train:
     llpips: 2.0
   timesteps: [250, 200, 150, 100]
   num_inference_steps: 5
-  # mixed precision
-  use_amp: True                
-  use_fsdp: False                
-  # random seed 
-  seed: 123456                 
+  use_amp: True
+  use_fsdp: False
+  seed: 123456
   global_seeding: False
   noise_detach: False
 
 validate:
-  batch: 2
-  use_ema: True            
-  log_freq: 4      # logging frequence
+  batch: 1
+  use_ema: True
+  log_freq: 1
   val_y_channel: True
