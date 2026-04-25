@@ -376,3 +376,298 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 --nnodes=1
 - неверный путь в YAML;
 - недостаточное количество файлов в датасете;
 - отсутствие нужного веса или сетевого доступа в момент первой загрузки модели/метрик.
+
+## Рабочий скрипт подготовки RealSR
+
+Нужен не разбор неудачных вариантов, а один воспроизводимый путь. Он теперь вынесен в отдельный скрипт:
+
+```text
+prepare_realsr_v3_working_dataset.sh
+```
+
+Что нужно заранее:
+
+1. положить архив RealSR как `data/RealSR (ICCV2019).tar.gz`;
+2. положить `weights/vgg16_sdturbo_lpips.pth`;
+3. дальше запускать только два скрипта подряд.
+
+Команды:
+
+```bash
+cd /code/auto_remaster/sandbox/InvSR
+./prepare_realsr_v3_working_dataset.sh
+./run_train_realsr_v3_x4_single_gpu.sh
+```
+
+Что делает `prepare_realsr_v3_working_dataset.sh`:
+
+1. если raw RealSR еще не распакован, распаковывает `data/RealSR (ICCV2019).tar.gz` в `data/RealSR-raw`;
+2. собирает `data/RealSR-prepared/train_hr` из symlink-ов на все `*_HR.png` из:
+   - `Canon/Train/2`
+   - `Canon/Train/3`
+   - `Canon/Train/4`
+   - `Nikon/Train/2`
+   - `Nikon/Train/3`
+   - `Nikon/Train/4`
+3. собирает `data/RealSR-prepared/val_gt_x4_native_hr_mod8` и `data/RealSR-prepared/val_lq_x4_native_lr_mod8` из `Canon/Test/4` и `Nikon/Test/4`;
+4. для validation делает правильную геометрию:
+   - `GT` режется до `mod8`
+   - `LQ` режется до точного `x4`-соответствия `GT`
+5. проверяет итоговые размеры набора:
+   - `train_hr = 505`
+   - `val = 30` пар.
+
+Итоговые рабочие пути после запуска скрипта:
+
+```text
+data/RealSR-prepared/train_hr
+data/RealSR-prepared/val_lq_x4_native_lr_mod8
+data/RealSR-prepared/val_gt_x4_native_hr_mod8
+```
+
+Именно эти пути уже зашиты в `configs/sd-turbo-sr-ldis-realsr.yaml`, поэтому после подготовки датасета можно сразу запускать train.
+
+### 6. Какой конфиг в итоге стал рабочим
+
+Для real-data запуска использовался отдельный конфиг:
+
+```text
+configs/sd-turbo-sr-ldis-realsr.yaml
+```
+
+Ключевые настройки, которые были важны:
+
+- train path:
+	- `data.train.params.data_source.source1.root_path: data/RealSR-prepared/train_hr`
+- validation paths:
+	- `data.val.params.dir_path: data/RealSR-prepared/val_lq_x4_native_lr_mod8`
+	- `data.val.params.extra_dir_path: data/RealSR-prepared/val_gt_x4_native_hr_mod8`
+- ускорение первого прогона:
+	- `train.batch: 2`
+	- `validate.batch: 1`
+	- `train.save_freq: 100`
+- экономия памяти и времени:
+	- `sd_pipe.enable_grad_checkpoint: False`
+	- `sd_pipe.enable_grad_checkpoint_vae: False`
+	- `discriminator.enable_grad_checkpoint: False`
+
+Почему `validate.batch: 1` обязательно:
+
+- validation-картинки имеют разное пространственное разрешение;
+- при `batch > 1` dataloader пытается их `stack`-нуть и падает.
+
+### 7. Команда запуска, которая реально заработала
+
+Рабочий entrypoint был вынесен в отдельный скрипт:
+
+```text
+run_train_realsr_v3_x4_single_gpu.sh
+```
+
+Запуск:
+
+```bash
+cd /code/auto_remaster/sandbox/InvSR
+./run_train_realsr_v3_x4_single_gpu.sh
+```
+
+Что делает скрипт:
+
+- активирует `.venv`;
+- запускает `main.py` через `torch.distributed.run` на `1` GPU;
+- использует `configs/sd-turbo-sr-ldis-realsr.yaml`;
+- создает отдельный timestamped `save_dir`, чтобы повторы запуска не конфликтовали по логам и чекпоинтам.
+
+### 8. Как понять, что все действительно заработало
+
+Успешный запуск выглядит так:
+
+1. создается train dataset на `505` изображений;
+2. создается val dataset на `30` пар;
+3. train проходит шаг `100`;
+4. после этого validation не падает;
+5. в логе появляются строки вида:
+
+```text
+Validation Metric: PSNR=24.98, LPIPS=0.5132...
+Validation Metric: PSNR=25.04, LPIPS=0.5444...
+Validation Metric: PSNR=24.76, LPIPS=0.5417...
+```
+
+6. появляются checkpoint-файлы:
+
+```text
+ckpts/model_100.pth
+ckpts/model_200.pth
+ckpts/model_300.pth
+ema_ckpts/ema_model_100.pth
+ema_ckpts/ema_model_200.pth
+ema_ckpts/ema_model_300.pth
+```
+
+Это и было критерием, что проблема реально решена, а не просто замаскирована стартом без валидации.
+
+### 9. На какие картинки смотреть, чтобы понять, что обучение уже можно останавливать
+
+Смотреть стоит не на `images/train`, а на `images/val` внутри конкретного run directory.
+
+Практический путь такой:
+
+```text
+save_dir/realsr_v3_x4_single_gpu/<run>/<timestamp>/images/val
+```
+
+В этой папке самые полезные файлы такие:
+
+- `LQ-1.png` ... `LQ-7.png` — входные low-quality изображения;
+- `GT-1.png` ... `GT-7.png` — ground truth для тех же validation-примеров;
+- `x0-progress-1.png` ... `x0-progress-7.png` — главные картинки для оценки качества SR;
+- `sample-progress-1.png` ... `sample-progress-7.png` — вспомогательные картинки, по ним удобно видеть, не разваливается ли sampling.
+
+Что важно понимать про эти файлы:
+
+- логгер пишет их из validation, а не из train;
+- при текущем `validate.log_freq: 4` и `validate.batch: 1` в лог попадают `7` validation-примеров за один validation pass;
+- `x0-progress-N.png` содержит всю цепочку по inference steps, поэтому смотреть нужно в первую очередь на правую, финальную часть картинки, а не на первые промежуточные кадры.
+
+На практике основной набор для просмотра такой:
+
+1. открыть рядом `LQ-N.png`, `x0-progress-N.png` и `GT-N.png`;
+2. в `x0-progress-N.png` смотреть на последний шаг справа;
+3. сравнивать этот последний шаг с `GT-N.png`, а не только с `LQ-N.png`.
+
+Признаки, что модель уже научилась апскейлить нормально и можно думать об остановке:
+
+- на последних шагах `x0-progress-N.png` уже восстанавливаются устойчивые мелкие структуры, а не случайная каша;
+- контуры становятся четче, но без двойных границ;
+- не появляются светлые или темные ореолы вокруг контрастных границ;
+- текстуры выглядят естественно и повторяемо на нескольких validation-примерах подряд;
+- лицо, надписи, мелкие линии, кирпич, листья, провода и другие высокочастотные детали перестают заметно улучшаться от одной validation-точки к следующей;
+- `PSNR` и `LPIPS` в логе выходят на плато одновременно с визуальным плато на `x0-progress-N.png`.
+
+Признаки, что training уже пора останавливать, даже если loss еще меняется:
+
+- последние validation-превью почти не отличаются между несколькими checkpoint-ами подряд;
+- новые checkpoint-и начинают добавлять резкость без реального прироста деталей;
+- появляются ringing/halo artifacts по краям;
+- появляются повторяющиеся искусственные текстуры, которых нет в `GT`;
+- на части примеров изображение становится визуально агрессивнее, хотя метрики уже не улучшаются.
+
+На какие именно сюжеты смотреть в первую очередь:
+
+- изображения с тонкими границами и диагоналями;
+- мелкие повторяющиеся текстуры;
+- участки с текстом, решетками, проводами, ветками;
+- яркие контрастные переходы, где быстро проявляются halo и oversharpening.
+
+Если нужен короткий рабочий критерий остановки, то он такой:
+
+1. дождаться, пока `x0-progress-1..7.png` станут визуально стабильными на нескольких соседних validation;
+2. убедиться, что финальный кадр справа уже близок к `GT`, а не просто стал более резким, чем `LQ`;
+3. остановить обучение, когда дальнейшие checkpoint-и перестают добавлять реальные детали и начинают только усиливать артефакты.
+
+### 10. Сколько, вероятно, обучал автор и как это соотносится с нашим запуском
+
+Точного ответа в открытых материалах автора нет.
+
+Что удалось установить по репозиторию и model card:
+
+- в `README.md` автор показывает только схему запуска на `4` GPU;
+- точное число часов или дней обучения автор не публикует;
+- в model card указано, что основной train делался на `LSDIR + 20K FFHQ`;
+- в оригинальном upstream-конфиге у автора стоит `iterations: 100000`.
+
+То есть достоверно известно следующее:
+
+1. автор рассчитывал на полноценный multi-GPU train;
+2. авторский основной train — это не `RealSR-only`, а большой synthetic/realistic mix через `LSDIR + FFHQ`;
+3. публично доступного значения вида `training took N hours on GPU X` нет.
+
+По оригинальному конфигу автора training budget такой:
+
+- global `batch: 64`;
+- `microbatch: 16`;
+- `iterations: 100000`;
+- `save_freq: 5000`;
+- validation на `16` изображениях;
+- запуск через `torchrun --nproc_per_node=4`.
+
+Важно: в `trainer.py` batch делится на число GPU, то есть `train.batch` у них задает global batch, а не per-GPU batch.
+
+Практически это означает:
+
+- у автора при `4` GPU effective per-GPU batch был `16`;
+- global sample budget автора за полный schedule был примерно `64 * 100000 = 6.4M` train samples.
+
+Наш текущий real-data запуск отличается радикально.
+
+Текущие параметры нашего рабочего конфига:
+
+- `batch: 2`;
+- `microbatch: 1`;
+- `iterations: 100000`;
+- `save_freq: 100`;
+- validation на `30` изображениях;
+- запуск на `1` GPU;
+- train dataset: `505` кадров из `RealSR`, а не `LSDIR + FFHQ`.
+
+Это дает такую разницу относительно автора:
+
+- по global batch мы меньше в `32` раза: `2` против `64`;
+- по полному sample budget мы тоже меньше примерно в `32` раза: `0.2M` против `6.4M` samples за `100000` итераций;
+- validation/checkpoint у нас происходят в `50` раз чаще: каждые `100` шагов вместо `5000`.
+
+Последний пункт особенно важен: наш run намного сильнее тормозится не самим train, а частыми validation и сохранением тяжелых checkpoint-ов.
+
+По текущим локальным логам видно две разные скорости:
+
+- чистые `100` train-итераций занимают примерно `35-36` секунд;
+- но wall-clock между `model_100.pth` и `model_200.pth` сейчас около `4` минут на каждые `100` шагов, потому что туда входит еще validation на `30` картинках и сохранение чекпоинтов.
+
+Из этого следует грубая практическая оценка для нашего текущего режима:
+
+- `1000` шагов: около `40` минут;
+- `10000` шагов: около `6.5-7` часов;
+- `100000` шагов: около `65-70` часов.
+
+Это не эквивалент авторскому training budget. Это уже другой режим:
+
+- меньше данных;
+- сильно меньше batch;
+- single-GPU вместо `4` GPU;
+- очень частая validation ради контроля качества.
+
+Практический вывод:
+
+- не стоит пытаться интерпретировать наши `100000` шагов как «тот же самый train, что у автора»;
+- наш текущий run — это скорее управляемый fine-tune/адаптация под `RealSR` с частым визуальным контролем;
+- останавливать его нужно не по мысли «автор обучал столько-то часов», а по validation-картинкам и моменту, когда улучшения перестают быть видны.
+
+Если цель — приблизиться именно к авторскому training regime, то нужно менять не только время запуска, но и сам setup:
+
+- вернуть большой train set `LSDIR + 20K FFHQ`;
+- вернуть большой global batch;
+- уменьшить частоту validation/checkpoint хотя бы ближе к авторским `5000` шагам;
+- запускать multi-GPU.
+
+### 11. Полный минимальный рецепт с нуля
+
+Если собрать все в один список, то рабочий порядок такой:
+
+1. скачать `vgg16_sdturbo_lpips.pth` в `weights/`;
+2. скачать RealSR archive из официального `csjcai/RealSR` и положить как `data/RealSR (ICCV2019).tar.gz`;
+3. распаковать его в `data/RealSR-raw/`;
+4. создать `data/RealSR-prepared/train_hr` как набор symlink-ов на все `*_HR.png` из `Canon/Nikon Train/{2,3,4}`;
+5. создать `data/RealSR-prepared/val_lq_x4_native_lr_mod8` и `data/RealSR-prepared/val_gt_x4_native_hr_mod8` из raw `Canon/Nikon Test/4`;
+6. использовать `configs/sd-turbo-sr-ldis-realsr.yaml`;
+7. запускать через `./run_train_realsr_v3_x4_single_gpu.sh`.
+
+Коротко: train починил не новый Python-код, а правильный real-data layout.
+
+Конкретно сработало вот это:
+
+- train собирается из `HR`-кадров raw RealSR;
+- validation собирается из настоящих `LR4/HR` пар raw RealSR;
+- `GT` в validation дополнительно обрезается до `mod8`, а `LQ` до точного `x4`-соответствия.
+
+Именно после этого validation перестал падать и начались штатные сохранения checkpoint-ов.
