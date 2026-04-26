@@ -95,7 +95,7 @@ $$
 
 Как обучается noise predictor:
 
-- Берут pretrained diffusion-модель, в статье это SD-Turbo в latent space VQGAN.
+- Берут pretrained diffusion-модель, в локальной реализации это `stabilityai/sd-turbo`, работающий в стандартном VAE/AutoencoderKL latent space Stable Diffusion.
 - Берут HR-изображение и синтезируют LR через real-world degradation pipeline.
 - Случайно выбирают стартовый timestep из набора вроде {250, 200, 150, 100}.
 - Noise predictor получает LR и timestep и выдает распределение шума, а не просто один deterministic tensor.
@@ -104,6 +104,158 @@ $$
   - L2/latent diffusion loss для fidelity,
   - LPIPS для perceptual similarity,
   - GAN loss для более правдоподобных деталей.
+
+Ниже важное уточнение по локальному коду: в реализации эти три лосса считаются не напрямую на предсказанном шуме, а на восстановленном latent после одного прохода через frozen SD-Turbo UNet.
+
+Полная цепочка в коде такая:
+
+- `NoisePredictor` возвращает не один тензор, а `DiagonalGaussianDistribution`, если включен `double_z=True`; это видно в [src/diffusers/models/autoencoders/autoencoder_kl.py](./src/diffusers/models/autoencoders/autoencoder_kl.py), где `forward()` отдает posterior, а не готовый шум.
+- В training loop это распределение берется как `model_pred = self.model(...)` в [trainer.py](./trainer.py).
+- Затем в [trainer.py](./trainer.py) внутри `sd_forward_step()` строится стартовый noisy latent:
+
+$$
+z_t^{noisy} = z_t^{clean} + \\sigma_t \, \hat{n}, \qquad \hat{n} \sim q_w(n \mid y, t)
+$$
+
+- После этого frozen UNet предсказывает residual noise `eps_pred`, и уже из него получают итоговый reconstruction latent:
+
+$$
+z_0^{pred} = z_t^{noisy} - \\sigma_t \, \epsilon_\theta(z_t^{noisy}, t, c)
+$$
+
+- Именно `z0_pred` потом сравнивается с `z0_gt = gt_latent` во всех трех основных loss-термах в [trainer.py](./trainer.py).
+
+### Что именно является target в коде
+
+- `z0_gt` - это latent GT-изображения после VAE-энкодера; он готовится в `prepare_data()` через `encode_first_stage(im_gt, ...)` в [trainer.py](./trainer.py).
+- В `start_mode=True` clean стартовое состояние берется не из HR, а из bicubic-upsampled LR, который затем кодируется VAE в `zt_clean`; это видно в `sd_forward_step()` в [trainer.py](./trainer.py).
+- Поэтому noise predictor здесь оптимизируется не на задачу "угадай истинный Gaussian epsilon", а на задачу "построй такое стартовое noisy latent-состояние, из которого frozen SD-UNet восстановит хороший `z0_pred`".
+
+### 1. L2 / latent diffusion loss
+
+В коде это `losses["ldif"]` в `backward_step()` в [trainer.py](./trainer.py). При конфиге по умолчанию `train.loss_type: L2` из [configs/sd-turbo-sr-ldis.yaml](./configs/sd-turbo-sr-ldis.yaml) считается:
+
+$$
+\mathcal{L}_{ldif} = \lambda_{ldif} \cdot \operatorname{mean}\left((z_0^{pred} - z_0^{gt})^2\right)
+$$
+
+где усреднение идет по всем latent-координатам каждого объекта батча.
+
+Что здесь важно:
+
+- Это не классический diffusion loss вида MSE между `predicted noise` и `ground-truth noise`.
+- Это reconstruction loss в latent space между итоговым восстановленным `z0_pred` и эталонным `z0_gt`.
+- Из-за этого `ldif` напрямую давит на fidelity: чтобы после короткой траектории SD-Turbo latent остался близок к latent настоящего HR.
+- В конфиге коэффициент стоит `ldif: 1.0`, то есть этот член является базовым anchor на точность реконструкции.
+- При желании код поддерживает и `L1`, но в основном конфиге используется именно `L2`; переключение видно в ветке `if self.configs.train.loss_type == "L2"` в [trainer.py](./trainer.py).
+
+Интуитивно этот loss отвечает на вопрос: "Насколько близко итоговый latent попал к target-latent?" Если оставить только его, модель обычно будет тяготеть к более усредненным, безопасным решениям без агрессивной текстурной галлюцинации.
+
+### 2. LPIPS, но именно latent LPIPS
+
+Короткая формулировка "LPIPS" в статье и в обзоре немного упрощает реальную реализацию. В локальном коде это не обычный pixel-space LPIPS по RGB, а `latent LPIPS` по 4-канальным VAE-latent'ам.
+
+Это видно по двум местам:
+
+- В конфиге [configs/sd-turbo-sr-ldis.yaml](./configs/sd-turbo-sr-ldis.yaml) для `llpips` задано `latent: True` и `in_chans: 4`.
+- В [trainer.py](./trainer.py) лосс создается как `latent_lpips.lpips.LPIPS`, замораживается через `self.freeze_model(llpips_loss)` и загружается из `weights/vgg16_sdturbo_lpips.pth`.
+
+Сам расчет в [latent_lpips/lpips.py](./latent_lpips/lpips.py) устроен так:
+
+- обе latent-карты прогоняются через VGG-подобный backbone для latent space;
+- на каждом уровне берутся нормализованные feature map'ы;
+- считается покомпонентный квадрат разности признаков;
+- затем поверх разностей применяются обученные `1x1` линейные слои `NetLinLayer`;
+- после spatial average результаты суммируются по уровням.
+
+То есть по смыслу это:
+
+$$
+\mathcal{L}_{llpips} = \lambda_{llpips} \cdot \sum_l w_l\, d\big(\phi_l(z_0^{pred}), \phi_l(z_0^{gt})\big)
+$$
+
+где $\phi_l$ - признаки backbone на разных уровнях, а $w_l$ - learned linear weights LPIPS-head'ов.
+
+В training loop это добавляется так:
+
+$$
+\mathcal{L}_{llpips} = \lambda_{llpips} \cdot \mathrm{LPIPS}_{latent}(z_0^{pred}, z_0^{gt})
+$$
+
+с коэффициентом `llpips: 2.0` в [configs/sd-turbo-sr-ldis.yaml](./configs/sd-turbo-sr-ldis.yaml).
+
+Практический смысл этого члена:
+
+- `ldif` штрафует точечное отклонение latent-координат,
+- `llpips` штрафует perceptual mismatch на уровне признаков,
+- поэтому модель можно толкать к более выразительным текстурам без слишком сильного ухода от структуры.
+
+Именно поэтому корректнее говорить не просто "LPIPS для perceptual similarity", а "latent LPIPS на признаках, адаптированных под SD-Turbo latent space".
+
+### 3. GAN loss: adversarial обучение в latent space
+
+Третий член тоже в обзоре полезно уточнить. В коде нет абстрактного "GAN loss" одной строкой; есть отдельный discriminator, отдельный generator-side adversarial loss и отдельный discriminator-side hinge loss.
+
+Конфигурация discriminator находится в [configs/sd-turbo-sr-ldis.yaml](./configs/sd-turbo-sr-ldis.yaml): это `diffusers.models.unets.unet_2d_condition_discriminator.UNet2DConditionDiscriminator`, который принимает:
+
+- latent-карту,
+- timestep,
+- text conditioning через `prompt_embeds`.
+
+Generator-side adversarial term считается в `backward_step()` в [trainer.py](./trainer.py):
+
+- discriminator получает `z0_pred`, предварительно зажатый в диапазон `[-10, 10]`;
+- затем `get_loss_from_discrimnator()` возвращает
+
+$$
+\mathcal{L}_{g,adv} = -\operatorname{mean}(D(z_0^{pred}, t, c))
+$$
+
+- если discriminator возвращает список logits с нескольких уровней, код усредняет вклад по всем таким выходам.
+
+Именно этот generator-side член записывается как:
+
+$$
+\mathcal{L}_{ldis} = \lambda_{ldis} \cdot \mathcal{L}_{g,adv}
+$$
+
+с коэффициентом `ldis: 0.1` в [configs/sd-turbo-sr-ldis.yaml](./configs/sd-turbo-sr-ldis.yaml).
+
+Но отдельно обучается и сам discriminator. Это происходит в `dis_backward_step()` в [trainer.py](./trainer.py), где real/fake logits подаются в `hinge_d_loss()`:
+
+$$
+\mathcal{L}_D = \frac{1}{2}\,\mathbb{E}[\max(0, 1 - D(z_0^{gt})) + \max(0, 1 + D(z_0^{pred}))]
+$$
+
+Что из этого следует practically:
+
+- `z0_gt` выступает как real latent,
+- `z0_pred` выступает как fake latent,
+- discriminator учится различать "настоящий HR latent" и "latent, к которому пришла короткая diffusion-траектория",
+- generator через `ldis` получает градиент в сторону более правдоподобных текстур и деталей.
+
+Еще две важные детали из кода:
+
+- adversarial сигнал включается не сразу: до `dis_init_iterations` generator получает нулевой `ldis`; это сделано в [trainer.py](./trainer.py) и в конфиге [configs/sd-turbo-sr-ldis.yaml](./configs/sd-turbo-sr-ldis.yaml) по умолчанию стоит `dis_init_iterations: 10000`.
+- discriminator обучается отдельно после шага generator, а в логах печатаются также средние `real` и `fake` logits; это как раз те `real/fake`, которые видны в training log.
+
+### Как эти три члена работают вместе
+
+В конце `backward_step()` в [trainer.py](./trainer.py) все активные члены просто суммируются:
+
+$$
+\mathcal{L}_{total} = \mathcal{L}_{ldif} + \mathcal{L}_{llpips} + \mathcal{L}_{ldis} + \text{(опциональные KL-термы, если они включены)}
+$$
+
+По умолчанию в основном конфиге активны именно `ldif`, `llpips` и `ldis`, а KL-термы в этой рецептуре выключены.
+
+Их роли можно запомнить так:
+
+- `ldif` удерживает reconstruction рядом с target latent и отвечает за fidelity.
+- `llpips` заставляет совпадать perceptual-структуры в feature space и помогает избежать чрезмерной гладкости.
+- `ldis` толкает решение в сторону реалистичных high-frequency деталей, которые чистый MSE/L1 обычно недовосстанавливает.
+
+Поэтому наиболее точная формулировка для этого локального кода такая: модель не просто учится предсказывать "правильный шум", а учится строить такое стартовое шумовое latent-состояние, чтобы после одного короткого SD-денойзинга итоговый latent одновременно был близок к GT, perceptually похож на него и выглядел для discriminator как правдоподобный HR latent.
 
 Зачем GAN и LPIPS:
 
@@ -116,9 +268,116 @@ $$
 - Выбирается число шагов, например 1, 3 или 5.
 - От него зависит список timesteps.
 - Предсказывается стартовый шум только для первого выбранного timestep.
-- Из LR создается стартовый latent.
+- Желаемый размер HR задается отдельно как целевой upscale factor, а не возникает сам собой из diffusion-процесса.
+- LR сначала поднимается до целевого spatial size, затем кодируется VAE в latent space.
+- Уже в этом latent space строится стартовое noisy состояние.
 - Затем pretrained diffusion UNet делает короткую reverse trajectory по выбранным timesteps.
 - В конце latent декодируется через VAE в HR-изображение.
+
+Если разложить это чуть точнее, то inference состоит из двух почти независимых частей:
+
+- геометрия задачи: какого размера должен быть итоговый HR;
+- генеративное восстановление: как заполнить этот размер правдоподобными деталями.
+
+В локальном коде это особенно хорошо видно.
+
+### Откуда берется x4 на инференсе
+
+Важно не перепутать две вещи:
+
+- `x4` super-resolution задается явно как параметр задачи;
+- diffusion-модель уже работает внутри этого заранее выбранного размера.
+
+В sample-конфиге [configs/sample-sd-turbo.yaml](./configs/sample-sd-turbo.yaml) стоит `basesr.sf: 4`. В [sampler_invsr.py](./sampler_invsr.py) для входного LR размера $(H, W)$ целевой HR размер вычисляется как:
+
+$$
+(H_{HR}, W_{HR}) = (4H, 4W)
+$$
+
+Именно этот `target_size` передается в pipeline для инференса. То есть x4 здесь задается не тем, что "патчи склеились", и не тем, что "SD-Turbo сам умеет x4", а тем, что inference pipeline заранее говорит: выход должен быть ровно в 4 раза больше по каждой оси.
+
+### Что происходит внутри pipeline
+
+После того как выбран `target_size`, LR не подается в UNet как есть. В локальном коде сначала делается bicubic upsample до целевого HR-размера, а уже потом этот upsampled image кодируется через VAE в latent.
+
+Схематически это выглядит так:
+
+$$
+y_{LR} \xrightarrow{\text{bicubic upsample to } 4H \times 4W} y_{up}
+$$
+
+$$
+y_{up} \xrightarrow{\text{VAE encode}} z_{clean}
+$$
+
+$$
+z_t = z_{clean} + \sigma_t \hat{n}_t
+$$
+
+$$
+z_t \xrightarrow{\text{frozen SD-Turbo reverse}} z_0^{pred} \xrightarrow{\text{VAE decode}} x_{HR}
+$$
+
+Это важная инженерная идея метода: diffusion здесь не "растягивает" изображение сама по себе. Она получает уже заданный spatial canvas нужного размера и в этом canvas восстанавливает структуры и текстуры.
+
+### Важная особенность локального инференса: patch chopping и склейка
+
+Для больших изображений локальный inference не всегда гонит всю картинку целиком. В [sampler_invsr.py](./sampler_invsr.py) есть две ветки:
+
+- если вход уже помещается в рабочий размер патча, изображение обрабатывается целиком за один вызов pipeline;
+- если изображение больше, оно режется на перекрывающиеся LR-патчи, каждый патч отдельно проходит SR, а потом результат сшивается обратно.
+
+Это делает класс `ImageSpliterTh` в [utils/util_image.py](./utils/util_image.py).
+
+Что он делает по шагам:
+
+- хранит исходную LR-картинку;
+- заранее создает пустой HR-холст размера `height * sf` на `width * sf`;
+- нарезает LR на перекрывающиеся окна;
+- для каждого окна хранит, куда его HR-результат должен быть положен в итоговом полотне;
+- после обработки всех патчей усредняет перекрытия и собирает финальный результат.
+
+Ключевой момент: склейка патчей не создает x4-масштабирование. Она работает уже после того, как каждому патчу отдельно сказали увеличить его в x4.
+
+То есть логика не такая:
+
+$$
+	ext{порезали LR на куски} \to \text{склеили} \to x4
+$$
+
+а такая:
+
+$$
+	ext{порезали LR на куски} \to \text{каждый кусок отдельно сделали } x4 \to \text{сшили HR-куски}
+$$
+
+### Можно ли обрабатывать несколько патчей сразу
+
+Да. Это еще одна полезная особенность локальной реализации.
+
+В `ImageSpliterTh` есть параметр `extra_bs`, который позволяет за один проход собрать несколько LR-патчей в общий batch. После этого pipeline одним forward-pass обрабатывает сразу несколько патчей, и затем они раскладываются обратно по своим координатам в итоговом HR-холсте.
+
+Именно поэтому корректно говорить так:
+
+- патчи режутся и сшиваются последовательно на уровне общего цикла;
+- но внутри одного шага этого цикла можно обработать сразу несколько патчей параллельно как один batch на GPU.
+
+Практически это означает:
+
+- если VRAM хватает, можно ускорять inference, прогоняя несколько патчей сразу;
+- если VRAM не хватает, `extra_bs` уменьшают и патчи идут более мелкими пачками;
+- итоговый результат не меняет геометрию SR, а лишь влияет на throughput и удобство обработки больших изображений.
+
+### Как это лучше всего запомнить
+
+Короткая и точная формулировка такая:
+
+- коэффициент SR, например x4, задается отдельно как целевой размер выхода;
+- diffusion-модель работает уже внутри этого размера;
+- для больших картинок inference режет LR на перекрывающиеся патчи;
+- каждый патч отдельно проходит x4 SR;
+- затем HR-патчи сшиваются обратно с weighted blending;
+- несколько патчей могут обрабатываться сразу как один batch на GPU.
 
 Что означает arbitrary-steps:
 
